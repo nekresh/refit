@@ -115,4 +115,15 @@ namespace Refit
             Header = header;
         }
     }
+
+    [AttributeUsage(AttributeTargets.Property)]
+    public class ComposeAttribute : Attribute
+    {
+        public string Uri { get; private set; }
+
+        public ComposeAttribute(string uri)
+        {
+            Uri = uri;
+        }
+    }
 }

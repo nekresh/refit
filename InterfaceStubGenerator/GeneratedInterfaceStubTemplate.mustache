@@ -61,6 +61,24 @@ namespace {{Namespace}}
         }
 
 {{/MethodList}}
+
+{{#PropertyList}}
+        public {{Type}} {{Name}}
+        {
+{{#IsRefitProperty}}
+            get
+            {
+                var attribute = GetType().GetInterfaceMap(typeof({{InterfaceName}}{{#TypeParameters}}<{{.}}>{{/TypeParameters}})).InterfaceType
+                    .GetProperty("{{Name}}").GetCustomAttributes(typeof(Refit.ComposeAttribute), false)
+                    .OfType<Refit.ComposeAttribute>().FirstOrDefault();
+                return Refit.RestService.For<{{Type}}>(new Uri(Client.BaseAddress, attribute.Uri).AbsoluteUri);
+            }
+{{/IsRefitProperty}}
+{{^IsRefitProperty}}
+            get { throw new NotImplementedException("This property has no Refit composition attribute."); }
+{{/IsRefitProperty}}
+        }
+{{/PropertyList}}
     }
 }
 

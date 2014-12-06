@@ -51,7 +51,8 @@ namespace Refit.Generator
                 return new List<InterfaceDeclarationSyntax>();
 
             return nodes.OfType<InterfaceDeclarationSyntax>()
-                .Where(i => i.Members.OfType<MethodDeclarationSyntax>().Any(HasRefitHttpMethodAttribute))
+                .Where(i => i.Members.OfType<MethodDeclarationSyntax>().Any(HasRefitHttpMethodAttribute) ||
+                            i.Members.OfType<PropertyDeclarationSyntax>().Any(HasInterfaceCompositionAttribute))
                 .ToList();
         }
 
@@ -68,6 +69,16 @@ namespace Refit.Generator
                 .Any(a => httpMethodAttributeNames.Contains(a.Name.ToString().Split('.').Last()) &&
                     a.ArgumentList.Arguments.Count == 1 &&
                     a.ArgumentList.Arguments[0].Expression.CSharpKind() == SyntaxKind.StringLiteralExpression);
+        }
+
+        static readonly HashSet<string> interfaceCompositionAttributeNames = new HashSet<string>(
+            new[] {"Compose"}
+                .SelectMany(x => new[] {"{0}", "{0}Attribute"}.Select(f => string.Format(f, x))));
+
+        public bool HasInterfaceCompositionAttribute(PropertyDeclarationSyntax property)
+        {
+            return property.AttributeLists.SelectMany(a => a.Attributes)
+                .Any(a => interfaceCompositionAttributeNames.Contains(a.Name.ToString().Split('.').Last()));
         }
 
         public TemplateInformation GenerateTemplateInfoForInterfaceList(List<InterfaceDeclarationSyntax> interfaceList)
@@ -123,6 +134,15 @@ namespace Refit.Generator
                 })
                 .ToList();
 
+            ret.PropertyList = interfaceTree.Members
+                .OfType<PropertyDeclarationSyntax>()
+                .Select(x => new PropertyTemplateInfo() {
+                    Name = x.Identifier.ValueText,
+                    Type = x.Type.ToString(),
+                    IsRefitProperty = HasInterfaceCompositionAttribute(x)
+                })
+                .ToList();
+
             return ret;
         }
 
@@ -156,6 +176,7 @@ namespace Refit.Generator
         public string TypeParameters { get; set; }
         public string ConstraintClauses { get; set; }
         public List<MethodTemplateInfo> MethodList { get; set; }
+        public List<PropertyTemplateInfo> PropertyList { get; set; }
     }
 
     public class MethodTemplateInfo
@@ -165,6 +186,13 @@ namespace Refit.Generator
         public string ArgumentListWithTypes { get; set; }
         public string ArgumentList { get; set; }
         public bool IsRefitMethod { get; set; }
+    }
+
+    public class PropertyTemplateInfo
+    {
+        public string Type { get; set; }
+        public string Name { get; set; }
+        public bool IsRefitProperty { get; set; }
     }
 
     public class TemplateInformation
