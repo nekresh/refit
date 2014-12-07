@@ -68,7 +68,8 @@ namespace {{Namespace}}
 {{#IsRefitProperty}}
             get
             {
-                var attribute = GetType().GetInterfaceMap(typeof({{InterfaceName}}{{#TypeParameters}}<{{.}}>{{/TypeParameters}})).InterfaceType
+                var interfaceType = typeof({{InterfaceName}}{{#TypeParameters}}<{{.}}>{{/TypeParameters}});
+                var attribute = GetType().GetInterfaces().SingleOrDefault(i => i == interfaceType)
                     .GetProperty("{{Name}}").GetCustomAttributes(typeof(Refit.ComposeAttribute), false)
                     .OfType<Refit.ComposeAttribute>().FirstOrDefault();
                 return Refit.RestService.For<{{Type}}>(new Uri(Client.BaseAddress, attribute.Uri).AbsoluteUri);

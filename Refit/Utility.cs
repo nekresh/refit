@@ -62,6 +62,11 @@ namespace Refit
                 .Where(p => p.GetMethod.IsPublic || p.SetMethod.IsPublic)
                 .ToArray();
         }
+
+        public static IEnumerable<Type> GetInterfaces(this Type type)
+        {
+            return type.GetTypeInfo().ImplementedInterfaces;
+        }
     }
 
     [Flags]

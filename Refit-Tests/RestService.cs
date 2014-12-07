@@ -61,6 +61,38 @@ namespace Refit.Tests
         public string Url { get; set; }
     }
 
+    public interface IGroupServices
+    {
+        [Compose("/github")]
+        IGitHubApi Github { get; }
+
+        [Compose("/crud")]
+        IBoringCrudApi<string, int> Crud { get; }
+    }
+
+    public interface IComposeGeneric<T, TKey> where T : class
+    {
+        [Compose("/crud")]
+        IBoringCrudApi<T, TKey> Crud { get; }
+    }
+
+    [Headers("User-Agent: Refit Integration Tests")]
+    public interface IGitHubUsers
+    {
+        [Get("/{username}")]
+        Task<User> GetUser(string userName);
+    }
+
+    [Headers("User-Agent: Refit Integration Tests")]
+    public interface IComposedGitHub
+    {
+        [Compose("/users")]
+        IGitHubUsers Users { get; }
+
+        [Get("/")]
+        Task<HttpResponseMessage> GetIndex();
+    }
+
     [TestFixture]
     public class RestServiceIntegrationTests
     {
@@ -248,6 +280,51 @@ namespace Refit.Tests
             Assert.AreEqual("http://httpbin.org/get?param=foo", result.Url);
             Assert.AreEqual("foo", result.Args["param"]);
             Assert.AreEqual("99", result.Headers["X-Refit"]);
+        }
+
+        [Test]
+        public void ComposedInterfaceShouldReturnProxies()
+        {
+            var fixture = RestService.For<IGroupServices>("http://www.example.com");
+
+            var github = fixture.Github;
+            var crud = fixture.Crud;
+
+            Assert.IsInstanceOf<IGitHubApi>(github);
+            Assert.IsInstanceOf<IBoringCrudApi<string, int>>(crud);
+        }
+
+        [Test]
+        public void ComposedGenericInterfaceShoudReturnProxy()
+        {
+            var fixture = RestService.For<IComposeGeneric<string, string>>("http://www.example.com");
+
+            var crud = fixture.Crud;
+
+            Assert.IsInstanceOf<IBoringCrudApi<string, string>>(crud);
+        }
+
+        [Test]
+        public async Task ComposedInterfaceCanContainStandardRefitMethods()
+        {
+            var fixture = RestService.For<IComposedGitHub>("https://api.github.com");
+            var result = await fixture.GetIndex();
+
+            Assert.IsNotNull(result);
+            Assert.IsTrue(result.IsSuccessStatusCode);
+        }
+
+        [Test]
+        public async Task HitGithubThroughAComposedInterface()
+        {
+            var fixture = RestService.For<IComposedGitHub>("https://api.github.com");
+            JsonConvert.DefaultSettings =
+                () => new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() };
+
+            var result = await fixture.Users.GetUser("octocat");
+
+            Assert.AreEqual("octocat", result.Login);
+            Assert.IsFalse(String.IsNullOrEmpty(result.AvatarUrl));
         }
     }
 }
