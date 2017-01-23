@@ -12,8 +12,6 @@ Desktop.ini
 *.user
 *.userprefs
 
-.vs/
-
 # Build results
 bin/[Dd]ebug/
 bin/[Rr]elease/
@@ -41,13 +39,6 @@ ipch/
 *.ncb
 *.opensdf
 *.sdf
-
-*.ide/
-
-
-*.lock.json
-*.nuget.props
-*.nuget.targets
 
 # Visual Studio profiler
 *.psess
