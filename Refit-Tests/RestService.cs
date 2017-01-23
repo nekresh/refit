@@ -5,10 +5,12 @@ using System.Net;
 using System.Net.Http;
 using System.Reactive.Linq;
 using System.Threading.Tasks;
-using Newtonsoft.Json.Serialization;
-using NUnit.Framework;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
+using Xunit;
 using Refit; // InterfaceStubGenerator looks for this
+using RichardSzalay.MockHttp;
+
 
 namespace Refit.Tests
 {
@@ -59,6 +61,12 @@ namespace Refit.Tests
         Task<bool> PostAValue([Body] string derp);
     }
 
+    public interface IHttpContentApi
+    {
+        [Post("/blah")]
+        Task<HttpContent> PostFileUpload([Body] HttpContent content);
+    }
+
     public class HttpBinGet
     {
         public Dictionary<string, string> Args { get; set; }
@@ -67,81 +75,141 @@ namespace Refit.Tests
         public string Url { get; set; }
     }
 
-    [TestFixture]
     public class RestServiceIntegrationTests
     {
-        [Test]
+        [Fact]
         public async Task HitTheGitHubUserApi()
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
-            JsonConvert.DefaultSettings = 
-                () => new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() };
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.Expect(HttpMethod.Get, "https://api.github.com/users/octocat")
+                    .Respond("application/json", "{ 'login':'octocat', 'avatar_url':'http://foo/bar' }");
+      
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
 
             var result = await fixture.GetUser("octocat");
 
-            Assert.AreEqual("octocat", result.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result.AvatarUrl));
+            Assert.Equal("octocat", result.Login);
+            Assert.False(String.IsNullOrEmpty(result.AvatarUrl));
+
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task HitWithCamelCaseParameter()
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
-            JsonConvert.DefaultSettings =
-                () => new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() };
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.Expect(HttpMethod.Get, "https://api.github.com/users/octocat")
+                   .Respond("application/json", "{ 'login':'octocat', 'avatar_url':'http://foo/bar' }");
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
 
             var result = await fixture.GetUserCamelCase("octocat");
 
-            Assert.AreEqual("octocat", result.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result.AvatarUrl));
+            Assert.Equal("octocat", result.Login);
+            Assert.False(String.IsNullOrEmpty(result.AvatarUrl));
+
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task HitTheGitHubOrgMembersApi()
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
-            JsonConvert.DefaultSettings = 
-                () => new JsonSerializerSettings { ContractResolver = new SnakeCasePropertyNamesContractResolver() };
+            var mockHttp = new MockHttpMessageHandler();
 
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.Expect(HttpMethod.Get, "https://api.github.com/orgs/github/members")
+                  .Respond("application/json", "[{ 'login':'octocat', 'avatar_url':'http://foo/bar', 'type':'User'}]");
+
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
+     
             var result = await fixture.GetOrgMembers("github");
 
-            Assert.IsTrue(result.Count > 0);
-            Assert.IsTrue(result.Any(member => member.Type == "User"));
+            Assert.True(result.Count > 0);
+            Assert.True(result.Any(member => member.Type == "User"));
+
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task HitTheGitHubUserSearchApi()
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
-            JsonConvert.DefaultSettings = 
-                () => new JsonSerializerSettings { ContractResolver = new SnakeCasePropertyNamesContractResolver() };
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.Expect(HttpMethod.Get, "https://api.github.com/search/users")
+                    .WithQueryString("q", "tom repos:>42 followers:>1000")
+                    .Respond("application/json", "{ 'total_count': 1, 'items': [{ 'login':'octocat', 'avatar_url':'http://foo/bar', 'type':'User'}]}");
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
 
             var result = await fixture.FindUsers("tom repos:>42 followers:>1000");
 
-            Assert.IsTrue(result.TotalCount > 0);
-            Assert.IsTrue(result.Items.Any(member => member.Type == "User"));
+            Assert.True(result.TotalCount > 0);
+            Assert.True(result.Items.Any(member => member.Type == "User"));
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task HitTheGitHubUserApiAsObservable()
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
-            JsonConvert.DefaultSettings = 
-                () => new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() };
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.Expect(HttpMethod.Get, "https://api.github.com/users/octocat")
+                    .Respond("application/json", "{ 'login':'octocat', 'avatar_url':'http://foo/bar' }");
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
+
 
             var result = await fixture.GetUserObservable("octocat")
                 .Timeout(TimeSpan.FromSeconds(10));
 
-            Assert.AreEqual("octocat", result.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result.AvatarUrl));
+            Assert.Equal("octocat", result.Login);
+            Assert.False(String.IsNullOrEmpty(result.AvatarUrl));
+
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task HitTheGitHubUserApiAsObservableAndSubscribeAfterTheFact()
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
-            JsonConvert.DefaultSettings = 
-                () => new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() };
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.When(HttpMethod.Get, "https://api.github.com/users/octocat")
+                    .Respond("application/json", "{ 'login':'octocat', 'avatar_url':'http://foo/bar' }");
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
 
             var obs = fixture.GetUserObservable("octocat")
                 .Timeout(TimeSpan.FromSeconds(10));
@@ -150,226 +218,179 @@ namespace Refit.Tests
             // after the result has completed.
             await obs;
             var result2 = await obs;
-            Assert.AreEqual("octocat", result2.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result2.AvatarUrl));
+            Assert.Equal("octocat", result2.Login);
+            Assert.False(String.IsNullOrEmpty(result2.AvatarUrl));
         }
-
-        [Test]
-        public async Task HitTheGitHubUserApiWithSettingsObj()
-        {
-            JsonConvert.DefaultSettings = () => new JsonSerializerSettings() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
-            var fixture = RestService.For<IGitHubApi>(
-                "https://api.github.com",
-                new RefitSettings{
-                    JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
-                });
-
-
-            var result = await fixture.GetUser("octocat");
-
-            Assert.AreEqual("octocat", result.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result.AvatarUrl));
-        }
-
-        [Test]
-        public async Task HitWithCamelCaseParameterWithSettingsObj()
-        {
-            JsonConvert.DefaultSettings = () => new JsonSerializerSettings() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
-            var fixture = RestService.For<IGitHubApi>(
-                "https://api.github.com",
-                new RefitSettings
-                {
-                    JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
-                });
-
-
-            var result = await fixture.GetUserCamelCase("octocat");
-
-            Assert.AreEqual("octocat", result.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result.AvatarUrl));
-        }
-
-        [Test]
-        public async Task HitTheGitHubOrgMembersApiWithSettingsObj()
-        {
-            JsonConvert.DefaultSettings = () => new JsonSerializerSettings() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
-            var fixture = RestService.For<IGitHubApi>(
-                "https://api.github.com",
-                new RefitSettings
-                {
-                    JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
-                });
-
-
-            var result = await fixture.GetOrgMembers("github");
-
-            Assert.IsTrue(result.Count > 0);
-            Assert.IsTrue(result.Any(member => member.Type == "User"));
-        }
-
-        [Test]
-        public async Task HitTheGitHubUserSearchApiWithSettingsObj()
-        {
-            JsonConvert.DefaultSettings = () => new JsonSerializerSettings() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
-            var fixture = RestService.For<IGitHubApi>(
-                "https://api.github.com",
-                new RefitSettings
-                {
-                    JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
-                });
-
-            var result = await fixture.FindUsers("tom repos:>42 followers:>1000");
-
-            Assert.IsTrue(result.TotalCount > 0);
-            Assert.IsTrue(result.Items.Any(member => member.Type == "User"));
-        }
-
-        [Test]
-        public async Task HitTheGitHubUserApiAsObservableWithSettingsObj()
-        {
-            JsonConvert.DefaultSettings = () => new JsonSerializerSettings() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
-            var fixture = RestService.For<IGitHubApi>(
-                "https://api.github.com",
-                new RefitSettings
-                {
-                    JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
-                });
-
-
-            var result = await fixture.GetUserObservable("octocat")
-                .Timeout(TimeSpan.FromSeconds(10));
-
-            Assert.AreEqual("octocat", result.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result.AvatarUrl));
-        }
-
-        [Test]
-        public async Task HitTheGitHubUserApiAsObservableAndSubscribeAfterTheFactWithSettingsObj()
-        {
-            JsonConvert.DefaultSettings = () => new JsonSerializerSettings() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
-            var fixture = RestService.For<IGitHubApi>(
-                "https://api.github.com",
-                new RefitSettings
-                {
-                    JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
-                });
-
-
-            var obs = fixture.GetUserObservable("octocat")
-                .Timeout(TimeSpan.FromSeconds(10));
-
-            // NB: We're gonna await twice, so that the 2nd await is definitely
-            // after the result has completed.
-            await obs;
-            var result2 = await obs;
-            Assert.AreEqual("octocat", result2.Login);
-            Assert.IsFalse(String.IsNullOrEmpty(result2.AvatarUrl));
-        }
-
-
-        [Test]
+        
+        [Fact]
         public async Task TwoSubscriptionsResultInTwoRequests()
         {
             var input = new TestHttpMessageHandler();
+
+            // we need to use a factory here to ensure each request gets its own httpcontent instance
+            input.ContentFactory = () => new StringContent("test");
+
             var client = new HttpClient(input) { BaseAddress = new Uri("http://foo") };
             var fixture = RestService.For<IGitHubApi>(client);
 
-            Assert.AreEqual(0, input.MessagesSent);
+            Assert.Equal(0, input.MessagesSent);
 
             var obs = fixture.GetIndexObservable()
                 .Timeout(TimeSpan.FromSeconds(10));
 
-            await obs;
-            Assert.AreEqual(1, input.MessagesSent);
+            var result1 = await obs;
+            Assert.Equal(1, input.MessagesSent);
 
-            var result = await obs;
-            Assert.AreEqual(2, input.MessagesSent);
+            var result2 = await obs;
+            Assert.Equal(2, input.MessagesSent);
 
             // NB: TestHttpMessageHandler returns what we tell it to ('test' by default)
-            Assert.IsTrue(result.Contains("test"));
+            Assert.True(result1.Contains("test"));
+            Assert.True(result2.Contains("test"));
         }
 
-        [Test]
+        [Fact]
         public async Task ShouldRetHttpResponseMessage()
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.When(HttpMethod.Get, "https://api.github.com/")
+                    .Respond(HttpStatusCode.OK);
+
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
             var result = await fixture.GetIndex();
 
-            Assert.IsNotNull(result);
-            Assert.IsTrue(result.IsSuccessStatusCode);
+            Assert.NotNull(result);
+            Assert.True(result.IsSuccessStatusCode);
         }
 
-        [Test]
+        [Fact]
         public async Task HitTheNpmJs()
         {
-            var fixture = RestService.For<INpmJs>("https://registry.npmjs.org");
+             var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp
+            };
+
+            mockHttp.Expect(HttpMethod.Get, "https://registry.npmjs.org/congruence")
+                    .Respond("application/json", "{ '_id':'congruence', '_rev':'rev' , 'name':'name'}");
+      
+
+
+            var fixture = RestService.For<INpmJs>("https://registry.npmjs.org", settings);
             var result = await fixture.GetCongruence();
 
-            Assert.AreEqual("congruence", result._id);
+            Assert.Equal("congruence", result._id);
+
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task PostToRequestBin()
         {
-            var fixture = RestService.For<IRequestBin>("http://httpbin.org/");
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp
+            };
+
+            mockHttp.Expect(HttpMethod.Post, "http://httpbin.org/1h3a5jm1")
+                    .Respond(HttpStatusCode.OK);
+
+            var fixture = RestService.For<IRequestBin>("http://httpbin.org/", settings);
             
             try {
                 await fixture.Post();
             } catch (ApiException ex) { 
                 // we should be good but maybe a 404 occurred
             }
+
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task CanGetDataOutOfErrorResponses() 
         {
-            var fixture = RestService.For<IGitHubApi>("https://api.github.com");
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp,
+                JsonSerializerSettings = new JsonSerializerSettings() { ContractResolver = new SnakeCasePropertyNamesContractResolver() }
+            };
+
+            mockHttp.When(HttpMethod.Get, "https://api.github.com/give-me-some-404-action")
+                    .Respond(HttpStatusCode.NotFound, "application/json", "{'message': 'Not Found', 'documentation_url': 'http://foo/bar'}");
+
+
+            var fixture = RestService.For<IGitHubApi>("https://api.github.com", settings);
             try {
                 await fixture.NothingToSeeHere();
-                Assert.Fail();
+                Assert.True(false);
             } catch (ApiException exception) {
-                Assert.AreEqual(HttpStatusCode.NotFound, exception.StatusCode);
+                Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
                 var content = exception.GetContentAs<Dictionary<string, string>>();
 
-                Assert.AreEqual("Not Found", content["message"]);
-                Assert.IsNotNull(content["documentation_url"]);
+                Assert.Equal("Not Found", content["message"]);
+                Assert.NotNull(content["documentation_url"]);
             }
         }
 
-        [Test]
+        [Fact]
         public void NonRefitInterfacesThrowMeaningfulExceptions() 
         {
             try {
                 RestService.For<INoRefitHereBuddy>("http://example.com");
             } catch (InvalidOperationException exception) {
-                StringAssert.StartsWith("INoRefitHereBuddy", exception.Message);
+                Assert.StartsWith("INoRefitHereBuddy", exception.Message);
             }
         }
 
-        [Test]
+        [Fact]
         public async Task NonRefitMethodsThrowMeaningfulExceptions() 
         {
             try {
                 var fixture = RestService.For<IAmHalfRefit>("http://example.com");
                 await fixture.Get();
             } catch (NotImplementedException exception) {
-                StringAssert.Contains("no Refit HTTP method attribute", exception.Message);
+                Assert.Contains("no Refit HTTP method attribute", exception.Message);
             }
         }
 
-        [Test]
+        [Fact]
         public async Task GenericsWork() 
         {
-            var fixture = RestService.For<IHttpBinApi<HttpBinGet, string, int>>("http://httpbin.org/get");
+            var mockHttp = new MockHttpMessageHandler();
+
+            var settings = new RefitSettings {
+                HttpMessageHandlerFactory = () => mockHttp
+            };
+
+            mockHttp.Expect(HttpMethod.Get, "http://httpbin.org/get")
+                    .WithHeaders("X-Refit", "99")
+                    .WithQueryString("param", "foo")
+                    .Respond("application/json", "{'url': 'http://httpbin.org/get?param=foo', 'args': {'param': 'foo'}, 'headers':{'X-Refit':'99'}}");
+
+
+
+            var fixture = RestService.For<IHttpBinApi<HttpBinGet, string, int>>("http://httpbin.org/get", settings);
 
             var result = await fixture.Get("foo", 99);
 
-            Assert.AreEqual("http://httpbin.org/get?param=foo", result.Url);
-            Assert.AreEqual("foo", result.Args["param"]);
-            Assert.AreEqual("99", result.Headers["X-Refit"]);
+            Assert.Equal("http://httpbin.org/get?param=foo", result.Url);
+            Assert.Equal("foo", result.Args["param"]);
+            Assert.Equal("99", result.Headers["X-Refit"]);
+
+            mockHttp.VerifyNoOutstandingExpectation();
         }
 
-        [Test]
+        [Fact]
         public async Task ValueTypesArentValidButTheyWorkAnyway()
         {
             var handler = new TestHttpMessageHandler("true");
@@ -378,7 +399,7 @@ namespace Refit.Tests
 
             var result = await fixture.PostAValue("Does this work?");
 
-            Assert.AreEqual(true, result);
+            Assert.Equal(true, result);
         }
     }
 }

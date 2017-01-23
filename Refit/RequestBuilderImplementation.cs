@@ -1,5 +1,4 @@
 using System;
-using System.Net;
 using System.Collections;
 using System.Net.Http;
 using System.Collections.Generic;
@@ -11,12 +10,13 @@ using System.Text.RegularExpressions;
 using System.Text;
 using Newtonsoft.Json;
 using System.IO;
-using HttpUtility = System.Web.HttpUtility;
 using System.Threading;
+
+using HttpUtility = System.Web.HttpUtility;
 
 namespace Refit
 {
-    public class RequestBuilderFactory : IRequestBuilderFactory
+    class RequestBuilderFactory : IRequestBuilderFactory
     {
         public IRequestBuilder Create(Type interfaceType, RefitSettings settings = null)
         {
@@ -24,7 +24,7 @@ namespace Refit
         }
     }
 
-    public class RequestBuilderImplementation : IRequestBuilder
+    class RequestBuilderImplementation : IRequestBuilder
     {
         readonly Type targetType;
         readonly Dictionary<string, RestMethodInfo> interfaceHttpMethods;
@@ -53,7 +53,7 @@ namespace Refit
             get { return interfaceHttpMethods.Keys; }
         }
 
-        public Func<object[], HttpRequestMessage> BuildRequestFactoryForMethod(string methodName, string basePath = "")
+        Func<object[], HttpRequestMessage> buildRequestFactoryForMethod(string methodName, string basePath, bool paramsContainsCancellationToken)
         {
             if (!interfaceHttpMethods.ContainsKey(methodName)) {
                 throw new ArgumentException("Method must be defined and have an HTTP Method attribute");
@@ -61,32 +61,48 @@ namespace Refit
             var restMethod = interfaceHttpMethods[methodName];
 
             return paramList => {
-                var ret = new HttpRequestMessage() {
+                // make sure we strip out any cancelation tokens
+                if (paramsContainsCancellationToken) {
+                    paramList = paramList.Where(o => o == null || o.GetType() != typeof(CancellationToken)).ToArray();
+                }
+                
+                var ret = new HttpRequestMessage {
                     Method = restMethod.HttpMethod,
                 };
 
-                foreach (var header in restMethod.Headers) {
-                    setHeader(ret, header.Key, header.Value);
-                }   
+                // set up multipart content
+                MultipartFormDataContent multiPartContent = null;
+                if (restMethod.IsMultipart) {
+                    multiPartContent = new MultipartFormDataContent("----MyGreatBoundary");
+                    ret.Content = multiPartContent;
+                }
 
                 string urlTarget = (basePath == "/" ? String.Empty : basePath) + restMethod.RelativePath;
                 var queryParamsToAdd = new Dictionary<string, string>();
+                var headersToAdd = new Dictionary<string, string>(restMethod.Headers);
 
                 for(int i=0; i < paramList.Length; i++) {
+                    // if part of REST resource URL, substitute it in
                     if (restMethod.ParameterMap.ContainsKey(i)) {
                         urlTarget = Regex.Replace(
                             urlTarget, 
                             "{" + restMethod.ParameterMap[i] + "}", 
-                            settings.UrlParameterFormatter.Format(paramList[i], restMethod.ParameterInfoMap[i]), 
-                            RegexOptions.IgnoreCase);
+                            settings.UrlParameterFormatter
+                                    .Format(paramList[i], restMethod.ParameterInfoMap[i])
+                                    .Replace("/", "%2F"), 
+                            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                         continue;
                     }
 
+                    // if marked as body, add to content
                     if (restMethod.BodyParameterInfo != null && restMethod.BodyParameterInfo.Item2 == i) {
                         var streamParam = paramList[i] as Stream;
                         var stringParam = paramList[i] as string;
+                        var httpContentParam = paramList[i] as HttpContent;
 
-                        if (streamParam != null) {
+                        if (httpContentParam != null) {
+                            ret.Content = httpContentParam;
+                        } else if (streamParam != null) {
                             ret.Content = new StreamContent(streamParam);
                         } else if (stringParam != null) {
                             ret.Content = new StringContent(stringParam);
@@ -104,14 +120,82 @@ namespace Refit
                         continue;
                     }
 
-
+                    // if header, add to request headers
                     if (restMethod.HeaderParameterMap.ContainsKey(i)) {
-                        setHeader(ret, restMethod.HeaderParameterMap[i], paramList[i]);
-                    } else {
-                        if (paramList[i] != null) {
-                            queryParamsToAdd[restMethod.QueryParameterMap[i]] = settings.UrlParameterFormatter.Format(paramList[i], restMethod.ParameterInfoMap[i]);
-                        }
+                        headersToAdd[restMethod.HeaderParameterMap[i]] = paramList[i] != null 
+                            ? paramList[i].ToString() 
+                            : null;
+                        continue;
                     }
+
+                    // ignore nulls
+                    if (paramList[i] == null) continue;
+
+                    // for anything that fell through to here, if this is not
+                    // a multipart method, add the parameter to the query string
+                    if (!restMethod.IsMultipart) {
+                        queryParamsToAdd[restMethod.QueryParameterMap[i]] = settings.UrlParameterFormatter.Format(paramList[i], restMethod.ParameterInfoMap[i]);
+                        continue;
+                    }
+
+                    // we are in a multipart method, add the part to the content
+                    // the parameter name should be either the attachment name or the parameter name (as fallback)
+                    string itemName;
+                    string parameterName;
+
+                    Tuple<string, string> attachment;
+                    if (!restMethod.AttachmentNameMap.TryGetValue(i, out attachment)) {
+                        itemName = restMethod.QueryParameterMap[i];
+                        parameterName = itemName;
+                    } else {
+                        itemName = attachment.Item1;
+                        parameterName = attachment.Item2;
+                    }
+
+
+                    // Check to see if it's an IEnumerable
+                    var itemValue = paramList[i];
+                    var enumerable = itemValue as IEnumerable<object>;
+                    var typeIsCollection = false;
+
+                    if (enumerable != null) {
+                        Type tType = null;
+                        var eType = enumerable.GetType();
+                        if (eType.GetTypeInfo().ContainsGenericParameters) {
+                            tType = eType.GenericTypeArguments[0];
+                        } else if (eType.IsArray) {
+                            tType = eType.GetElementType();
+                        }
+
+                        // check to see if it's one of the types we support for multipart:
+                        // FileInfo, Stream, string or byte[]
+                        if (tType == typeof(Stream) ||
+                            tType == typeof(string) ||
+                            tType == typeof(byte[])
+#if !NETFX_CORE
+                            || tType == typeof(FileInfo)
+#endif
+                        ) {
+                            typeIsCollection = true;
+                        }
+
+                        
+                    }
+
+                    if (typeIsCollection) {
+                        foreach (var item in enumerable) {
+                            addMultipartItem(multiPartContent, itemName, parameterName, item);
+                        }
+                    } else{
+                        addMultipartItem(multiPartContent, itemName, parameterName, itemValue);
+                    }
+
+                }
+
+                // NB: We defer setting headers until the body has been
+                // added so any custom content headers don't get left out.
+                foreach (var header in headersToAdd) {
+                    setHeader(ret, header.Key, header.Value);
                 }
 
                 // NB: The URI methods in .NET are dumb. Also, we do this 
@@ -135,10 +219,12 @@ namespace Refit
             };
         }
 
-        void setHeader(HttpRequestMessage request, string name, object value) 
+        static void setHeader(HttpRequestMessage request, string name, string value) 
         {
-            // Clear any existing version of this header we may have set, because
+            // Clear any existing version of this header that might be set, because
             // we want to allow removal/redefinition of headers. 
+            // We also don't want to double up content headers which may have been
+            // set for us automatically.
 
             // NB: We have to enumerate the header names to check existence because 
             // Contains throws if it's the wrong header type for the collection.
@@ -151,12 +237,48 @@ namespace Refit
 
             if (value == null) return;
 
-            var s = value.ToString();
-            request.Headers.TryAddWithoutValidation(name, s);
+            var added = request.Headers.TryAddWithoutValidation(name, value);
 
-            if (request.Content != null) {
-                request.Content.Headers.TryAddWithoutValidation(name, s);
+            // Don't even bother trying to add the header as a content header
+            // if we just added it to the other collection.
+            if (!added && request.Content != null) {
+                request.Content.Headers.TryAddWithoutValidation(name, value);
             }
+        }
+
+        void addMultipartItem(MultipartFormDataContent multiPartContent, string fileName, string parameterName, object itemValue)
+        {
+            var streamValue = itemValue as Stream;
+            var stringValue = itemValue as string;
+            var byteArrayValue = itemValue as byte[];
+
+            if (streamValue != null) {
+                var streamContent = new StreamContent(streamValue);
+                multiPartContent.Add(streamContent, parameterName, fileName);
+                return;
+            }
+             
+            if (stringValue != null) {
+                multiPartContent.Add(new StringContent(stringValue),  parameterName, fileName);
+                return;
+            }
+
+#if !NETFX_CORE
+            var fileInfoValue = itemValue as FileInfo;
+            if (fileInfoValue != null) {
+                var fileContent = new StreamContent(fileInfoValue.OpenRead());
+                multiPartContent.Add(fileContent, parameterName, fileInfoValue.Name);
+                return;
+            }
+#endif
+
+            if (byteArrayValue != null) {
+                var fileContent = new ByteArrayContent(byteArrayValue);
+                multiPartContent.Add(fileContent, parameterName, fileName);
+                return;
+            }
+
+            throw new ArgumentException($"Unexpected parameter type in a Multipart request. Parameter {fileName} is of type {itemValue.GetType().Name}, whereas allowed types are String, Stream, FileInfo, and Byte array", nameof(itemValue));
         }
 
         public Func<HttpClient, object[], object> BuildRestResultFuncForMethod(string methodName)
@@ -196,12 +318,19 @@ namespace Refit
         Func<HttpClient, object[], Task> buildVoidTaskFuncForMethod(RestMethodInfo restMethod)
         {                      
             return async (client, paramList) => {
-                var factory = BuildRequestFactoryForMethod(restMethod.Name, client.BaseAddress.AbsolutePath);
+                var factory = buildRequestFactoryForMethod(restMethod.Name, client.BaseAddress.AbsolutePath, restMethod.CancellationToken != null);
                 var rq = factory(paramList);
-                var resp = await client.SendAsync(rq);
 
-                if (!resp.IsSuccessStatusCode) {
-                    throw await ApiException.Create(resp, settings);
+                var ct = CancellationToken.None;
+
+                if (restMethod.CancellationToken != null) {
+                    ct = paramList.OfType<CancellationToken>().FirstOrDefault();
+                }
+
+                using (var resp = await client.SendAsync(rq, ct).ConfigureAwait(false)) {
+                    if (!resp.IsSuccessStatusCode) {
+                        throw await ApiException.Create(rq.RequestUri, restMethod.HttpMethod, resp, settings).ConfigureAwait(false);
+                    }
                 }
             };
         }
@@ -209,16 +338,23 @@ namespace Refit
         Func<HttpClient, object[], Task<T>> buildTaskFuncForMethod<T>(RestMethodInfo restMethod)
         {
             var ret = buildCancellableTaskFuncForMethod<T>(restMethod);
-            return (client, paramList) => ret(client, CancellationToken.None, paramList);
+
+            return (client, paramList) => {
+                if(restMethod.CancellationToken != null) {
+                    return ret(client, paramList.OfType<CancellationToken>().FirstOrDefault(), paramList);
+                }
+
+                return ret(client, CancellationToken.None, paramList);
+            };
         }
 
         Func<HttpClient, CancellationToken, object[], Task<T>> buildCancellableTaskFuncForMethod<T>(RestMethodInfo restMethod)
         {
             return async (client, ct, paramList) => {
-                var factory = BuildRequestFactoryForMethod(restMethod.Name, client.BaseAddress.AbsolutePath);
+                var factory = buildRequestFactoryForMethod(restMethod.Name, client.BaseAddress.AbsolutePath, restMethod.CancellationToken != null);
                 var rq = factory(paramList);
 
-                var resp = await client.SendAsync(rq, HttpCompletionOption.ResponseHeadersRead, ct);
+                var resp = await client.SendAsync(rq, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
                 if (restMethod.SerializedReturnType == typeof(HttpResponseMessage)) {
                     // NB: This double-casting manual-boxing hate crime is the only way to make 
@@ -228,15 +364,15 @@ namespace Refit
                 }
 
                 if (!resp.IsSuccessStatusCode) {
-                    throw await ApiException.Create(resp, restMethod.RefitSettings);
+                    throw await ApiException.Create(rq.RequestUri, restMethod.HttpMethod, resp, restMethod.RefitSettings).ConfigureAwait(false);
                 }
 
-                var ms = new MemoryStream();
-                var fromStream = await resp.Content.ReadAsStreamAsync();
-                await fromStream.CopyToAsync(ms, 4096, ct);
+                if (restMethod.SerializedReturnType == typeof(HttpContent)) {
+                    return (T)(object)resp.Content;
+                }
 
-                var bytes = ms.ToArray();
-                var content = Encoding.UTF8.GetString(bytes, 0, bytes.Length);
+                var content = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
                 if (restMethod.SerializedReturnType == typeof(string)) {
                     return (T)(object)content; 
                 }
@@ -249,8 +385,19 @@ namespace Refit
         {
             var taskFunc = buildCancellableTaskFuncForMethod<T>(restMethod);
 
-            return (client, paramList) => 
-                new TaskToObservable<T>(ct => taskFunc(client, ct, paramList));
+            return (client, paramList) => {
+                return new TaskToObservable<T>(ct => {
+                    var methodCt = CancellationToken.None;
+                    if (restMethod.CancellationToken != null) {
+                        methodCt = paramList.OfType<CancellationToken>().FirstOrDefault();
+                    }
+
+                    // link the two
+                    var cts = CancellationTokenSource.CreateLinkedTokenSource(methodCt, ct);
+
+                    return taskFunc(client, cts.Token, paramList);
+                });
+            };
         }
 
         class TaskToObservable<T> : IObservable<T>
@@ -309,17 +456,21 @@ namespace Refit
         public MethodInfo MethodInfo { get; set; }
         public HttpMethod HttpMethod { get; set; }
         public string RelativePath { get; set; }
+        public bool IsMultipart { get; private set; }
         public Dictionary<int, string> ParameterMap { get; set; }
+        public ParameterInfo CancellationToken { get; set; }
         public Dictionary<string, string> Headers { get; set; }
         public Dictionary<int, string> HeaderParameterMap { get; set; }
         public Tuple<BodySerializationMethod, int> BodyParameterInfo { get; set; }
         public Dictionary<int, string> QueryParameterMap { get; set; }
+        public Dictionary<int, Tuple<string, string>> AttachmentNameMap { get; set; }
         public Dictionary<int, ParameterInfo> ParameterInfoMap { get; set; }
         public Type ReturnType { get; set; }
         public Type SerializedReturnType { get; set; }
         public RefitSettings RefitSettings { get; set; }
 
         static readonly Regex parameterRegex = new Regex(@"{(.*?)}");
+        static readonly HttpMethod patchMethod = new HttpMethod("PATCH");
 
         public RestMethodInfo(Type targetInterface, MethodInfo methodInfo, RefitSettings refitSettings = null)
         {
@@ -335,27 +486,55 @@ namespace Refit
             HttpMethod = hma.Method;
             RelativePath = hma.Path;
 
+            IsMultipart = methodInfo.GetCustomAttributes(true)
+                .OfType<MultipartAttribute>()
+                .Any();
+
             verifyUrlPathIsSane(RelativePath);
             determineReturnTypeInfo(methodInfo);
 
-            var parameterList = methodInfo.GetParameters().ToList();
+            // Exclude cancellation token parameters from this list
+            var parameterList = methodInfo.GetParameters().Where(p => p.ParameterType != typeof(CancellationToken)).ToList();
             ParameterInfoMap = parameterList
                 .Select((parameter, index) => new { index, parameter })
                 .ToDictionary(x => x.index, x => x.parameter);
             ParameterMap = buildParameterMap(RelativePath, parameterList);
-            BodyParameterInfo = findBodyParameter(parameterList);
+            BodyParameterInfo = findBodyParameter(parameterList, IsMultipart, hma.Method);
 
             Headers = parseHeaders(methodInfo);
             HeaderParameterMap = buildHeaderParameterMap(parameterList);
 
+            // get names for multipart attachments
+            AttachmentNameMap = new Dictionary<int, Tuple<string, string>>();
+            if (IsMultipart) {
+                for (int i = 0; i < parameterList.Count; i++) {
+                    if (ParameterMap.ContainsKey(i) || HeaderParameterMap.ContainsKey(i)) {
+                        continue;
+                    }
+
+                    var attachmentName = getAttachmentNameForParameter(parameterList[i]);
+                    if (attachmentName == null)
+                        continue;
+
+                    AttachmentNameMap[i] = Tuple.Create(attachmentName, getUrlNameForParameter(parameterList[i]).ToLowerInvariant());
+                }
+            }
+
             QueryParameterMap = new Dictionary<int, string>();
             for (int i=0; i < parameterList.Count; i++) {
-                if (ParameterMap.ContainsKey(i) || HeaderParameterMap.ContainsKey(i) || (BodyParameterInfo != null && BodyParameterInfo.Item2 == i)) {
+                if (ParameterMap.ContainsKey(i) || HeaderParameterMap.ContainsKey(i) || (BodyParameterInfo != null && BodyParameterInfo.Item2 == i) || AttachmentNameMap.ContainsKey(i)) {
                     continue;
                 }
 
                 QueryParameterMap[i] = getUrlNameForParameter(parameterList[i]);
             }
+
+            var ctParams = methodInfo.GetParameters().Where(p => p.ParameterType == typeof(CancellationToken)).ToList();
+            if(ctParams.Count > 1) {
+                throw new ArgumentException("Argument list can only contain a single CancellationToken");
+            }
+
+            CancellationToken = ctParams.FirstOrDefault();
         }
 
         void verifyUrlPathIsSane(string relativePath) 
@@ -412,23 +591,63 @@ namespace Refit
             return aliasAttr != null ? aliasAttr.Name : paramInfo.Name;
         }
 
-        Tuple<BodySerializationMethod, int> findBodyParameter(List<ParameterInfo> parameterList)
+        string getAttachmentNameForParameter(ParameterInfo paramInfo)
         {
+            var nameAttr = paramInfo.GetCustomAttributes(true)
+                .OfType<AttachmentNameAttribute>()
+                .FirstOrDefault();
+            return nameAttr != null ? nameAttr.Name : null;
+        }
+
+        static Tuple<BodySerializationMethod, int> findBodyParameter(IList<ParameterInfo> parameterList, bool isMultipart, HttpMethod method)
+        {
+
+            // The body parameter is found using the following logic / order of precedence:
+            // 1) [Body] attribute
+            // 2) POST/PUT/PATCH: Reference type other than string
+            // 3) If there are two reference types other than string, without the body attribute, throw
+
             var bodyParams = parameterList
                 .Select(x => new { Parameter = x, BodyAttribute = x.GetCustomAttributes(true).OfType<BodyAttribute>().FirstOrDefault() })
                 .Where(x => x.BodyAttribute != null)
                 .ToList();
 
+            // multipart requests may not contain a body, implicit or explicit
+            if (isMultipart) {
+                if (bodyParams.Count > 0) {
+                    throw new ArgumentException("Multipart requests may not contain a Body parameter");
+                }
+                return null;
+            }
+
             if (bodyParams.Count > 1) {
                 throw new ArgumentException("Only one parameter can be a Body parameter");
             }
 
-            if (bodyParams.Count == 0) {
-                return null;
+            // #1, body attribute wins
+            if (bodyParams.Count == 1) {
+                var ret = bodyParams[0];
+                return Tuple.Create(ret.BodyAttribute.SerializationMethod, parameterList.IndexOf(ret.Parameter));
             }
 
-            var ret = bodyParams[0];
-            return Tuple.Create(ret.BodyAttribute.SerializationMethod, parameterList.IndexOf(ret.Parameter));
+            // Not in post/put/patch? bail
+            if (!method.Equals(HttpMethod.Post) && !method.Equals(HttpMethod.Put) && !method.Equals(patchMethod)) {
+                return null;
+            }
+         
+            // see if we're a post/put/patch
+            var refParams = parameterList.Where(pi => !pi.ParameterType.GetTypeInfo().IsValueType && pi.ParameterType != typeof(string)).ToList();
+            
+            // Check for rule #3
+            if (refParams.Count > 1) {
+                throw new ArgumentException("Multiple complex types found. Specify one parameter as the body using BodyAttribute");
+            } 
+            
+            if (refParams.Count == 1) {
+                return Tuple.Create(BodySerializationMethod.Json, parameterList.IndexOf(refParams[0]));
+            }
+
+            return null;
         }
 
         Dictionary<string, string> parseHeaders(MethodInfo methodInfo) 
@@ -505,62 +724,6 @@ namespace Refit
         }
     }
 
-    public class ApiException : Exception
-    {
-        public HttpStatusCode StatusCode { get; private set; }
-        public string ReasonPhrase { get; private set; }
-        public HttpResponseHeaders Headers { get; private set; }
-
-        public HttpContentHeaders ContentHeaders { get; private set; }
-
-        public string Content { get; private set; }
-
-        public bool HasContent {
-            get { return !String.IsNullOrWhiteSpace(Content); }
-        }
-        public RefitSettings RefitSettings{get;set;}
-
-        ApiException(HttpStatusCode statusCode, string reasonPhrase, HttpResponseHeaders headers, RefitSettings refitSettings = null) : 
-            base(createMessage(statusCode, reasonPhrase)) 
-        {
-            StatusCode = statusCode;
-            ReasonPhrase = reasonPhrase;
-            Headers = headers;
-            RefitSettings = refitSettings;
-        }
-
-        public T GetContentAs<T>()
-        {
-            return HasContent ? 
-                JsonConvert.DeserializeObject<T>(Content, RefitSettings.JsonSerializerSettings) : 
-                default(T);
-        }
-
-        public static async Task<ApiException> Create(HttpResponseMessage response, RefitSettings refitSettings = null) 
-        {
-            var exception = new ApiException(response.StatusCode, response.ReasonPhrase, response.Headers, refitSettings);
-
-            if (response.Content == null) return exception;
-            
-            try {
-                exception.ContentHeaders = response.Content.Headers;
-                exception.Content = await response.Content.ReadAsStringAsync();
-                response.Content.Dispose();
-            } catch {
-                // NB: We're already handling an exception at this point, 
-                // so we want to make sure we don't throw another one 
-                // that hides the real error.
-            }
-            
-            return exception;
-        }
-
-        static string createMessage(HttpStatusCode statusCode, string reasonPhrase)
-        {
-            return String.Format("Response status code does not indicate success: {0} ({1}).", (int)statusCode, reasonPhrase);
-        }
-    }
-
     class FormValueDictionary : Dictionary<string, string>
     {
         static readonly Dictionary<Type, PropertyInfo[]> propertyCache
@@ -605,6 +768,30 @@ namespace Refit
                 .OfType<AliasAsAttribute>()
                 .FirstOrDefault();
             return aliasAttr != null ? aliasAttr.Name : propertyInfo.Name;
+        }
+    }
+
+    class AuthenticatedHttpClientHandler : DelegatingHandler
+    {
+        readonly Func<Task<string>> getToken;
+
+        public AuthenticatedHttpClientHandler(Func<Task<string>> getToken, HttpMessageHandler innerHandler = null) 
+            : base(innerHandler ?? new HttpClientHandler())
+        {
+            if (getToken == null) throw new ArgumentNullException("getToken");
+            this.getToken = getToken;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            // See if the request has an authorize header
+            var auth = request.Headers.Authorization;
+            if (auth != null) {
+                var token = await getToken().ConfigureAwait(false);
+                request.Headers.Authorization = new AuthenticationHeaderValue(auth.Scheme, token);
+            }
+
+            return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
         }
     }
 }

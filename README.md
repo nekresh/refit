@@ -1,4 +1,4 @@
-## Refit: The automatic type-safe REST library for Xamarin and .NET
+## Refit: The automatic type-safe REST library for .NET Core, Xamarin and .NET
 
 Refit is a library heavily inspired by Square's
 [Retrofit](http://square.github.io/retrofit) library, and it turns your REST
@@ -23,19 +23,22 @@ var octocat = await gitHubApi.GetUser("octocat");
 
 ### Where does this work?
 
-Refit currently supports the following platforms:
+Refit currently supports the following platforms and any .NET Standard 1.3 target:
 
 * Xamarin.Android
 * Xamarin.Mac
 * Xamarin.iOS 64-bit (Unified API)
 * Desktop .NET 4.5 
-* Windows Phone 8
-* Windows Store (WinRT) 8.0/8.1
+* Windows Store 8.1+
 * Windows Phone 8.1 Universal Apps
+* .NET Core
 
 The following platforms are not supported:
 
 * Xamarin.iOS 32-bit - build system doesn't support targets files
+
+#### Note about .NET Core
+For .NET Core support, you must use a `csproj` type of project to host your Refit interfaces. This is because `xproj` cannot do compile-time code generation that's not included in the project file. If you are using `xproj` for either a website, class library, or application, you can still use Refit by creating a `netstandard` `csproj` and then using a project-to-project reference from your `xproj` to your `csproj`. This workaround won't be necessary once "VS 15" and the final .NET Core tooling ships.
 
 ### API Attributes
 
@@ -247,7 +250,7 @@ public interface IGitHubApi
 #### Dynamic headers
 
 If the content of the header needs to be set at runtime, you can add a header
-with a dynamic  value to a request by applying a `Header` attribute to a parameter:
+with a dynamic value to a request by applying a `Header` attribute to a parameter:
 
 ```csharp
 [Get("/users/{user}")]
@@ -289,6 +292,8 @@ class AuthenticatedHttpClientHandler : HttpClientHandler
 }
 ```
 
+While HttpClient contains a nearly identical method signature, it is used differently. HttpClient.SendAsync is not called by Refit. The HttpClientHandler must be modified instead.
+
 This class is used like so (example uses the [ADAL](http://msdn.microsoft.com/en-us/library/azure/jj573266.aspx) library to manage auto-token refresh but the principal holds for Xamarin.Auth or any other library:
 
 ```csharp
@@ -319,7 +324,7 @@ interface IMyRestService
 	Task<Foobar> SomePublicMethod();
 
 	[Get("/secretStuff")]
-    [Header("Authorization: Bearer")]
+    [Headers("Authorization: Bearer")]
 	Task<Location> GetLocationOfRebelBase();
 }
 
@@ -399,6 +404,28 @@ await CreateUser(user, null);
 await CreateUser(user, ""); 
 ```
 
+### Multipart uploads
+
+Methods decorated with `Multipart` attribute will be submitted with multipart content type.
+At this time, multipart methods support the following parameter types:
+
+ - string (parameter name will be used as name and string value as value)
+ - byte array
+ - Stream
+ - FileInfo
+
+For byte array and Stream parameters, use `AttachmentName` parameter attribute to specify the
+name for the attachment. For `FileInfo` parameters, the file name will be used.
+
+```csharp
+public interface ISomeApi
+{
+    [Multipart]
+    [Post("/users/{id}/photo")]
+    Task UploadPhoto(int id, [AttachmentName("photo.jpg")] Stream stream);
+}
+```
+
 ### Retrieving the response
 
 Note that in Refit unlike in Retrofit, there is no option for a synchronous
@@ -465,10 +492,3 @@ Which can be used like this:
 // than one type (unless you have a different domain for each type)
 var api = RestService.For<IReallyExcitingCrudApi<User, string>>("http://api.example.com/users"); 
 ``` 
-
-### What's missing / planned?
-
-Currently Refit is missing the following features from Retrofit that are
-planned for a future release soon:
-
-* Multipart requests (including file upload)

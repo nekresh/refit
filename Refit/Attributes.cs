@@ -58,6 +58,16 @@ namespace Refit
             get { return HttpMethod.Delete; }
         }
     }
+
+    [AttributeUsage(AttributeTargets.Method)]
+    public class PatchAttribute : HttpMethodAttribute
+    {
+        public PatchAttribute(string path) : base(path) { }
+
+        public override HttpMethod Method {
+            get { return new HttpMethod("PATCH"); }
+        }
+    }
         
     [AttributeUsage(AttributeTargets.Method)]
     public class HeadAttribute : HttpMethodAttribute
@@ -67,6 +77,10 @@ namespace Refit
         public override HttpMethod Method {
             get { return HttpMethod.Head; }
         }
+    }
+
+    [AttributeUsage(AttributeTargets.Method)]
+    public class MultipartAttribute : Attribute {
     }
 
     public enum BodySerializationMethod {
@@ -93,7 +107,17 @@ namespace Refit
             this.Name = name;
         }
     }
-    
+
+    [AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Property)]
+    public class AttachmentNameAttribute : Attribute
+    {
+        public string Name { get; protected set; }
+        public AttachmentNameAttribute(string name)
+        {
+            Name = name;
+        }
+    }
+
     [AttributeUsage(AttributeTargets.Interface | AttributeTargets.Method)]
     public class HeadersAttribute : Attribute
     {
@@ -113,6 +137,15 @@ namespace Refit
         public HeaderAttribute(string header)
         {
             Header = header;
+        }
+    }
+
+    [AttributeUsage(AttributeTargets.Parameter)]
+    public class AuthorizeAttribute : HeaderAttribute
+    {
+        public AuthorizeAttribute(string scheme = "Bearer")
+            : base("Authorization: " + scheme)
+        {
         }
     }
 }
